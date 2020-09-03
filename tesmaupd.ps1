@@ -5,29 +5,41 @@
 # CHG-MERIDIAN https://www.chg-meridian.com/
 
 # Created by Fernando Almeida (04/07/2019) - fernando.almeida@chg-meridian.com
+# Customized to Pif-Paf by Fernando Almeida (28/07/2020)
 
-$VERSION = "1.0.1"
+$VERSION = "1.1.1"
 $SHOW_PUT_RESULT = $false # Change to $true to show PUT result
 
 # Customer info
-$CUSTOMER_CostCenter = "BRADESCO1"
-$CUSTOMER_Local = "Predio Branco"
-$CUSTOMER_Department = "Contabilidade"
+$CUSTOMER_CostCenter = ""
+$CUSTOMER_Local = "Pif-Paf"
+$CUSTOMER_Department = ""
 
 # TESMA
-$TESMA_CustomerID = "333435"
+$TESMA_CustomerID = "350103"
 $TESMA_AssetID = ""
-
-$TESMA_Username = "01333435c" # Webservice enabled user 
+$TESMA_Username = "01350103d" # Webservice enabled user 
 $TESMA_Password = "nfx32ng47" # Password
-
 $TESMA_AuthorizationKey = ""
-$TESMA_API_Uri = "https://tesmademo.chg-meridian.com/api/assets"
+$TESMA_API_Uri = "https://api.chg-meridian.com/assets"
 $TESMA_Header_Accept = "application/vnd.tesma.v1+json"
 $TESMA_Content_Type = "application/vnd.tesma.v1+json"
+$TESMA_ConfigFile = ($env:USERPROFILE + "\TESMA.XML") # File is located on user profile. If deleted, system will query TESMA API again and recreate XML file.
 
-$ConfigFile = ($env:USERPROFILE + "\TESMA.XML") # File is located on user profile. If deleted, system will query TESMA API again and recreate XML file.
+# Folder to save not found assets
+#$FOLDER_ERROR = "\\srvawsfs01\FILES\LogTesma"
+$FOLDER_ERROR = "C:\Users\lfa"
 
+# Days between last run. Use -1 to always run
+$DAYS = 10
+
+function SaveData {
+	# Save assed data on $FOLDER_ERROR
+	$Filename = (GetManufacturer) + "-" + (GetComputerType) + "-" + (GetSerialNumber) + ".csv"
+	$Data = (GetManufacturer) + ";" + (GetComputerType) + ";" + (GetComputerModel) + ";" + (GetSerialNumber) + ";" + ((GetUserDomain) + "\" + (GetUserName)) + ";" + (GetComputerName) + ";" + (GetManufacturer) + ";" + (GetOSVersion) + ";" + (GetOSBits)
+	Write-output ("Asset not found in TESMA. Saving data to " + $FOLDER_ERROR + "\" + $Filename)
+	Out-File -FilePath ($FOLDER_ERROR + "\" + $Filename) -InputObject $Data -Encoding ASCII
+}
 function SaveAssetID {
     # Save asset ID to XML file
     # SaveAssetID(<assetid>)
@@ -41,12 +53,13 @@ function SaveAssetID {
     $xmlsettings.Indent = $true
     $xmlsettings.IndentChars = "    "
 
-    $XmlWriter = [System.XML.XmlWriter]::Create($ConfigFile, $xmlsettings)
+    $XmlWriter = [System.XML.XmlWriter]::Create($TESMA_ConfigFile, $xmlsettings)
     
     $xmlWriter.WriteStartDocument()
     
     $xmlWriter.WriteStartElement("Config")
     $xmlWriter.WriteElementString("AssetID", $assetid)
+    $xmlWriter.WriteElementString("LastUpdate", $((Get-Date).ToString("dd/MM/yyyy")))
     $xmlWriter.WriteEndElement()
     
     $xmlWriter.WriteEndDocument()
@@ -128,25 +141,22 @@ function AssetIdBySerialNumber {
         $serial
     )
 
-    if([System.IO.File]::Exists($ConfigFile)) { # Does TESMA.XML exist? If yes, use asset ID from XML, in order to save 1 TESMA API query
-        # Open TESMA.XML
-        $xml = [xml](Get-Content $ConfigFile)
-        # Read asset ID from XML file
-        $tmp = $xml.Config.AssetID
-        Write-Host ("ID read from XML: " + $tmp)
-    } else { # No TESMA.XML - maybe this is the first time using the script
+    # Read asset ID from XML file
+    $tmp = $xml.Config.AssetID
+
+    if($tmp -eq "") {
         try {
             # Query TESMA API
             $tmp = (Invoke-RestMethod -Uri ("$TESMA_API_Uri`?`$filter=serial_number eq '$serial'") -Headers @{Authorization=("Basic {0}" -f $TESMA_AuthorizationKey);Accept=$TESMA_Header_Accept}).Id
-            Write-Host ("ID read from TESMA: " + $tmp)
-            # Save asset ID to new TESMA.XML local file
-            SaveAssetID $tmp
         }
         catch { # Catch error. Show details and finish with error (-1)
             Write-Host ("Error: " + $_)
-            exit -1
+            $tmp = ""
         }
     }
+
+    # Save asset ID to new TESMA.XML local file
+    SaveAssetID $tmp
 
     return $tmp
 }
@@ -171,6 +181,13 @@ function GetAssetInformationBySerialNumber {
     return Invoke-RestMethod -Uri ("$TESMA_API_Uri?`$filter=serial_number eq '$serial'") -Headers @{Authorization=("Basic {0}" -f $TESMA_AuthorizationKey);Accept=$TESMA_Header_Accept}
 }
 
+# Open TESMA.XML
+$xml = ""
+
+if([System.IO.File]::Exists($TESMA_ConfigFile)) {
+    $xml = [xml](Get-Content $TESMA_ConfigFile)
+}
+
 # Welcome message
 Write-Output ":: TESMA Asset info auto-update Script ($VERSION)`nCreated by Fernando Almeida (04/07/2019) - fernando.almeida@chg-meridian.com`n"
 
@@ -178,11 +195,24 @@ Write-Output ":: TESMA Asset info auto-update Script ($VERSION)`nCreated by Fern
 $Bytes = [System.Text.Encoding]::UTF8.GetBytes($TESMA_Username + ":" + $TESMA_Password)
 $TESMA_AuthorizationKey = [Convert]::ToBase64String($Bytes) # Create TESMA Base64 Authorization key
 
+if($xml.Config.LastUpdate) {
+    $d1 = Get-Date
+    $d2 = [datetime]::parseexact(($xml.Config.LastUpdate), 'dd/MM/yyyy', $null)
+    $ts = New-TimeSpan -Start $d1 -End $d2
+
+    if((-($ts.Days)) -ge $DAYS) {
+        # Continue
+    } else {
+        Write-Output "Script is not set to run today."
+        exit 0
+    }
+}
+
 # Read the asset ID by given serial number
 $TESMA_AssetID = AssetIdBySerialNumber(GetSerialNumber)
 
 if([String]::IsNullOrEmpty($TESMA_AssetID)) {
-    Write-Output "Error: Asset not found in TESMA."
+    SaveData
     exit -1
 } else {
     # Create information package
